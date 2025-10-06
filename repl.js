@@ -92,6 +92,13 @@ Available commands:
       console.log(`🎧 Input set to: ${inputFile}`);
       break;
 
+    case "in_last":
+      if (!lastOutput) return console.log("No last output available.");
+      inputFile = lastOutput;
+      autosave();
+      console.log(`🎧 Input set to last output: ${inputFile}`);
+      break;
+
     case "search":
       if (!args.length) return console.log("Usage: search <text>");
       {
@@ -193,39 +200,55 @@ Available commands:
     case "r":
     case "run":
     case "run_pipeline": {
-      if (!inputFile && !args[0]) return console.log("No input file set (use 'in <file>' or specify in run)");
       if (!pipeline.length) return console.log("Pipeline is empty");
 
-      let currentInput = path.resolve(args[0] || inputFile);
-      const finalOutput = args[1]
-        ? path.resolve(args[1])
-        : path.resolve(`out_${Date.now()}.wav`);
-
-      for (let i = 0; i < pipeline.length; i++) {
-        const plug = pipeline[i];
-        const outputFile = i === pipeline.length - 1
-          ? finalOutput
-          : `${currentInput.replace(/(\.wav)$/i, "")}_step${i + 1}.wav`;
-
-        console.log(`🔹 Step ${i + 1}: ${plug.name} -> ${path.basename(outputFile)}`);
-
-        const cmdArgs = [
-          "process",
-          `--plugin=${plug.path}`,
-          `--input=${currentInput}`,
-          `--output=${outputFile}`,
-          "--overwrite",
-          ...plug.params.map(p => `--param=${p}`)
-        ];
-
-        try {
-          await execa(PLUGALYZER, cmdArgs, { stdio: "inherit" });
-        } catch (err) {
-          console.error(`❌ Failed at step ${i + 1}:`, err.shortMessage || err.message);
-          break;
+      // Extract --recurse=N and remove it from args
+      let recurse = 1;
+      const filteredArgs = [];
+      for (const a of args) {
+        if (a.startsWith("--recurse")) {
+          const parts = a.split("=");
+          if (parts[1]) recurse = parseInt(parts[1], 10) || 1;
+        } else {
+          filteredArgs.push(a);
         }
+      }
 
-        currentInput = outputFile;
+      // Determine input/output
+      if (!inputFile && !filteredArgs[0]) return console.log("No input file set (use 'in <file>' or specify in run)");
+      let currentInput = path.resolve(filteredArgs[0] || inputFile);
+      const finalOutput = filteredArgs[1]
+      ? path.resolve(filteredArgs[1])
+      : path.resolve(`out_${Date.now()}.wav`);
+
+      for (let r = 0; r < recurse; r++) {
+        console.log(`🔁 Recursive pass ${r + 1} of ${recurse}`);
+        for (let i = 0; i < pipeline.length; i++) {
+          const plug = pipeline[i];
+          const outputFile = (i === pipeline.length - 1)
+            ? finalOutput
+            : `${currentInput.replace(/(\.wav)$/i, "")}_step${i + 1}.wav`;
+
+          console.log(`🔹 Step ${i + 1}: ${plug.name} -> ${path.basename(outputFile)}`);
+
+          const cmdArgs = [
+            "process",
+            `--plugin=${plug.path}`,
+            `--input=${currentInput}`,
+            `--output=${outputFile}`,
+            "--overwrite",
+            ...plug.params.map(p => `--param=${p}`)
+          ];
+
+          try {
+            await execa(PLUGALYZER, cmdArgs, { stdio: "inherit" });
+          } catch (err) {
+            console.error(`❌ Failed at step ${i + 1}:`, err.shortMessage || err.message);
+            break;
+          }
+
+          currentInput = outputFile;
+        }
       }
 
       lastOutput = finalOutput;
