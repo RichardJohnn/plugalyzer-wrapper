@@ -3,9 +3,51 @@ import readline from "readline";
 import Database from "better-sqlite3";
 import { execa } from "execa";
 import path from "path";
+import fs from "fs";
 
 const db = new Database("plugins.db");
 const PLUGALYZER = "Plugalyzer";
+const AUTOSAVE_FILE = "autosave.json";
+
+let pipeline = [];
+let inputFile = null;
+let lastOutput = null;
+
+const saveState = (name = "state") => {
+  const file = `${name}.json`;
+  const data = { pipeline, inputFile, lastOutput };
+  fs.writeFileSync(file, JSON.stringify(data, null, 2));
+  if (name !== "autosave") {
+    console.log(`💾 Saved state to ${file}`);
+  }
+};
+
+const loadState = (name = "state") => {
+  const file = `${name}.json`;
+  if (!fs.existsSync(file)) return console.log(`No saved state found: ${file}`);
+  try {
+    const { pipeline: pl, inputFile: inf, lastOutput: out } = JSON.parse(fs.readFileSync(file, "utf-8"));
+    pipeline = pl || [];
+    inputFile = inf || null;
+    lastOutput = out || null;
+    console.log(`📂 Loaded state from ${file}`);
+    if (inputFile) console.log(`🎧 Input: ${inputFile}`);
+    if (!pipeline.length) console.log("Pipeline empty");
+    else pipeline.forEach((p, i) =>
+      console.log(`${i + 1}. [${p.id}] ${p.name} ${p.params?.length ? `(params: ${p.params.join(", ")})` : ""}`)
+    );
+  } catch (err) {
+    console.error("⚠️ Failed to load state:", err.message);
+  }
+};
+
+const autosave = () => saveState("autosave");
+
+// --- Load autosaved session if available ---
+if (fs.existsSync(AUTOSAVE_FILE)) {
+  console.log("🧠 Restoring previous session...");
+  loadState("autosave");
+}
 
 const rl = readline.createInterface({
   input: process.stdin,
@@ -14,11 +56,6 @@ const rl = readline.createInterface({
 });
 
 console.log("🎛️  Plugin REPL - type 'help' for commands");
-
-let pipeline = []; // stores plugin objects
-let inputFile = null;
-let lastOutput = null;
-
 rl.prompt();
 
 rl.on("line", async (line) => {
@@ -34,14 +71,16 @@ Available commands:
   search <text>                     Search plugins by name
   list                              List all plugins
   show <id>                         Show parameters for a plugin
-  add <id> [--param name:value ...] Add a plugin to the pipeline
+  add <id> [name:value ...]         Add a plugin to the pipeline
   ls, list_pipeline                 List plugins in the pipeline
-  mod <index> --param name:value... Modify params for pipeline item at 1-based index
-  remove <index>                    Remove plugin by 1-based pipeline index
+  mod <index> name:value ...        Modify params for pipeline item
+  rm, remove <index>                Remove plugin by 1-based index
   reset                             Reset the entire pipeline
-  play_last, play, p      Play the last generated output
-  r, run, run_pipeline <in> <out>   Run pipeline on input file
-  in                                Set input file
+  in <file>                         Set default input file
+  r, run, run_pipeline [in] [out]   Run pipeline on input (default: in)
+  play_last, play, p                Play the last generated output
+  save [name]                       Save pipeline + settings (default: state)
+  load [name]                       Load pipeline + settings (default: state)
   exit                              Quit the REPL
       `);
       break;
@@ -49,6 +88,8 @@ Available commands:
     case "in":
       if (!args.length) return console.log("Usage: in <file>");
       inputFile = args[0];
+      autosave();
+      console.log(`🎧 Input set to: ${inputFile}`);
       break;
 
     case "search":
@@ -80,6 +121,7 @@ Available commands:
           SELECT * FROM parameters
           WHERE plugin_id = ?
             AND "values" IS NOT NULL
+            AND "values" NOT LIKE '%MIDI CC'
             AND TRIM("values") != ''
             AND TRIM("values") != 'to'
         `).all(id);
@@ -95,23 +137,23 @@ Available commands:
       const plug = db.prepare("SELECT * FROM plugins WHERE id = ?").get(addId);
       if (!plug) return console.log(`No plugin found with ID ${addId}`);
 
-      // Take everything after the first argument as params
       const pluginParams = args.slice(1);
-
       pipeline.push({ ...plug, params: pluginParams });
-      console.log(`✅ Added to pipeline: ${plug.name} ${pluginParams.length ? `(with params: ${pluginParams.join(", ")})` : ""}`);
+      autosave();
+      console.log(`✅ Added to pipeline: ${plug.name} ${pluginParams.length ? `(params: ${pluginParams.join(", ")})` : ""}`);
       break;
     }
 
     case "ls":
     case "list_pipeline":
-      if (inputFile) console.log(`Input: ${inputFile}`);
+      if (inputFile) console.log(`🎧 Input: ${inputFile}`);
       if (!pipeline.length) console.log("Pipeline is empty");
-      else pipeline.forEach((p, i) => console.log(`${i + 1}. [${p.id}] ${p.name} ${p.params?.length ? `(params: ${p.params.join(", ")})` : ""}`));
+      else pipeline.forEach((p, i) =>
+        console.log(`${i + 1}. [${p.id}] ${p.name} ${p.params?.length ? `(params: ${p.params.join(", ")})` : ""}`)
+      );
       break;
 
-    case "mod":
-    case "modify": {
+    case "mod": {
       if (args.length < 2) return console.log("Usage: mod <index> name:value ...");
       const parsedIdx = parseInt(args[0], 10);
       if (isNaN(parsedIdx)) return console.log("Invalid index");
@@ -119,10 +161,9 @@ Available commands:
       if (modIndex < 0 || modIndex >= pipeline.length) return console.log("Index out of range");
 
       const newParams = args.slice(1);
-      if (!newParams.length) return console.log("Usage: mod <index> name:value ... (provide one or more entries)");
-
       const prev = pipeline[modIndex].params || [];
       pipeline[modIndex].params = newParams;
+      autosave();
 
       console.log(`✅ Modified pipeline[${parsedIdx}] params`);
       console.log(`   before: ${prev.length ? prev.join(", ") : "(none)"}`);
@@ -130,6 +171,7 @@ Available commands:
       break;
     }
 
+    case "rm":
     case "remove": {
       if (!args.length) return console.log("Usage: remove <index>");
       const parsedRemove = parseInt(args[0], 10);
@@ -137,29 +179,32 @@ Available commands:
       const rmIndex = parsedRemove - 1;
       if (rmIndex < 0 || rmIndex >= pipeline.length) return console.log("Index out of range");
       const removed = pipeline.splice(rmIndex, 1)[0];
+      autosave();
       console.log(`🗑️  Removed: ${removed.name}`);
       break;
     }
 
     case "reset":
       pipeline = [];
+      autosave();
       console.log("🔄 Pipeline cleared");
       break;
 
     case "r":
     case "run":
     case "run_pipeline": {
-      if (args.length < 1) return console.log("Usage: run_pipeline <input.wav> [output.wav]");
+      if (!inputFile && !args[0]) return console.log("No input file set (use 'in <file>' or specify in run)");
       if (!pipeline.length) return console.log("Pipeline is empty");
 
-      let currentInput = path.resolve(args[0]);
+      let currentInput = path.resolve(args[0] || inputFile);
       const finalOutput = args[1]
-      ? path.resolve(args[1])
-      : path.resolve(`out_${Date.now()}.wav`);
+        ? path.resolve(args[1])
+        : path.resolve(`out_${Date.now()}.wav`);
 
       for (let i = 0; i < pipeline.length; i++) {
         const plug = pipeline[i];
-        const outputFile = i === pipeline.length - 1 ? finalOutput
+        const outputFile = i === pipeline.length - 1
+          ? finalOutput
           : `${currentInput.replace(/(\.wav)$/i, "")}_step${i + 1}.wav`;
 
         console.log(`🔹 Step ${i + 1}: ${plug.name} -> ${path.basename(outputFile)}`);
@@ -184,13 +229,24 @@ Available commands:
       }
 
       lastOutput = finalOutput;
+      autosave();
       console.log(`🎉 Pipeline finished: ${finalOutput}`);
       break;
     }
 
+    case "s":
+    case "save":
+      saveState(args[0] || "state");
+      break;
+
+    case "l":
+    case "load":
+      loadState(args[0] || "state");
+      break;
+
     case "play_last":
     case "play":
-    case "p": {
+    case "p":
       if (!lastOutput) return console.log("No output file generated yet.");
       console.log(`▶️ Playing ${lastOutput}`);
       try {
@@ -199,7 +255,6 @@ Available commands:
         console.error("❌ Failed to play:", err.shortMessage || err.message);
       }
       break;
-    }
 
     case "exit":
       rl.close();
