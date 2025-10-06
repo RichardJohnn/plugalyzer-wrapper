@@ -16,6 +16,8 @@ const rl = readline.createInterface({
 console.log("🎛️  Plugin REPL - type 'help' for commands");
 
 let pipeline = []; // stores plugin objects
+let inputFile = null;
+let lastOutput = null;
 
 rl.prompt();
 
@@ -37,9 +39,16 @@ Available commands:
   mod <index> --param name:value... Modify params for pipeline item at 1-based index
   remove <index>                    Remove plugin by 1-based pipeline index
   reset                             Reset the entire pipeline
+  play_last, play, p      Play the last generated output
   r, run, run_pipeline <in> <out>   Run pipeline on input file
+  in                                Set input file
   exit                              Quit the REPL
       `);
+      break;
+
+    case "in":
+      if (!args.length) return console.log("Usage: in <file>");
+      inputFile = args[0];
       break;
 
     case "search":
@@ -96,6 +105,7 @@ Available commands:
 
     case "ls":
     case "list_pipeline":
+      if (inputFile) console.log(`Input: ${inputFile}`);
       if (!pipeline.length) console.log("Pipeline is empty");
       else pipeline.forEach((p, i) => console.log(`${i + 1}. [${p.id}] ${p.name} ${p.params?.length ? `(params: ${p.params.join(", ")})` : ""}`));
       break;
@@ -139,18 +149,18 @@ Available commands:
     case "r":
     case "run":
     case "run_pipeline": {
-      if (args.length < 2) return console.log("Usage: run_pipeline <input.wav> <output.wav>");
+      if (args.length < 1) return console.log("Usage: run_pipeline <input.wav> [output.wav]");
       if (!pipeline.length) return console.log("Pipeline is empty");
 
       let currentInput = path.resolve(args[0]);
-      const finalOutput = path.resolve(args[1]);
+      const finalOutput = args[1]
+      ? path.resolve(args[1])
+      : path.resolve(`out_${Date.now()}.wav`);
 
       for (let i = 0; i < pipeline.length; i++) {
         const plug = pipeline[i];
-        const outputFile =
-          i === pipeline.length - 1
-            ? finalOutput
-            : `${currentInput.replace(/(\.wav)$/i, "")}_step${i + 1}.wav`;
+        const outputFile = i === pipeline.length - 1 ? finalOutput
+          : `${currentInput.replace(/(\.wav)$/i, "")}_step${i + 1}.wav`;
 
         console.log(`🔹 Step ${i + 1}: ${plug.name} -> ${path.basename(outputFile)}`);
 
@@ -160,7 +170,7 @@ Available commands:
           `--input=${currentInput}`,
           `--output=${outputFile}`,
           "--overwrite",
-          ...((plug.params || []).map(p => `--param=${p}`))
+          ...plug.params.map(p => `--param=${p}`)
         ];
 
         try {
@@ -172,7 +182,22 @@ Available commands:
 
         currentInput = outputFile;
       }
+
+      lastOutput = finalOutput;
       console.log(`🎉 Pipeline finished: ${finalOutput}`);
+      break;
+    }
+
+    case "play_last":
+    case "play":
+    case "p": {
+      if (!lastOutput) return console.log("No output file generated yet.");
+      console.log(`▶️ Playing ${lastOutput}`);
+      try {
+        await execa("afplay", [lastOutput], { stdio: "inherit" });
+      } catch (err) {
+        console.error("❌ Failed to play:", err.shortMessage || err.message);
+      }
       break;
     }
 
