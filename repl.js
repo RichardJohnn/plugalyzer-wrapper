@@ -128,7 +128,7 @@ Available commands:
           SELECT * FROM parameters
           WHERE plugin_id = ?
             AND "values" IS NOT NULL
-            AND "values" NOT LIKE '%MIDI CC'
+            AND "name" NOT LIKE 'MIDI CC%'
             AND TRIM("values") != ''
             AND TRIM("values") != 'to'
         `).all(id);
