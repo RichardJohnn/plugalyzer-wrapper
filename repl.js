@@ -218,18 +218,18 @@ Available commands:
 
       // Determine input/output
       if (!inputFile && !filteredArgs[0]) return console.log("No input file set (use 'in <file>' or specify in run)");
-      let currentInput = path.resolve(filteredArgs[0] || inputFile);
+      let initialInput = path.resolve(filteredArgs[0] || inputFile);
       const finalOutput = filteredArgs[1]
       ? path.resolve(filteredArgs[1])
       : path.resolve(`out_${Date.now()}.wav`);
 
       for (let r = 0; r < recurse; r++) {
         console.log(`🔁 Recursive pass ${r + 1} of ${recurse}`);
+        let currentInput = r === 0 ? initialInput : lastOutput; // use lastOutput as input for next recursion
         for (let i = 0; i < pipeline.length; i++) {
           const plug = pipeline[i];
-          const outputFile = (i === pipeline.length - 1)
-            ? finalOutput
-            : `${currentInput.replace(/(\.wav)$/i, "")}_step${i + 1}.wav`;
+          const stepOutput = `${currentInput.replace(/(\.wav)$/i, "")}_r${r + 1}_step${i + 1}.wav`;
+          const outputFile = i === pipeline.length - 1 ? finalOutput : stepOutput;
 
           console.log(`🔹 Step ${i + 1}: ${plug.name} -> ${path.basename(outputFile)}`);
 
@@ -249,11 +249,13 @@ Available commands:
             break;
           }
 
-          currentInput = outputFile;
+          currentInput = outputFile; // next step uses this output
         }
+
+        lastOutput = finalOutput; // after each recursion, update lastOutput
+        console.log(`✅ Completed recursive pass ${r + 1}`);
       }
 
-      lastOutput = finalOutput;
       autosave();
       console.log(`🎉 Pipeline finished: ${finalOutput}`);
       break;
