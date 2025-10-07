@@ -167,7 +167,9 @@ Available commands:
       const modIndex = parsedIdx - 1;
       if (modIndex < 0 || modIndex >= pipeline.length) return console.log("Index out of range");
 
-      const newParams = args.slice(1);
+      // Join everything after the index into a single param string
+      const newParams = [args.slice(1).join(" ")];
+
       const prev = pipeline[modIndex].params || [];
       pipeline[modIndex].params = newParams;
       autosave();
