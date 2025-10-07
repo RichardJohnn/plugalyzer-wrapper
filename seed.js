@@ -9,10 +9,8 @@ const PLUGIN_DIRS = [
 ];
 
 const PLUGALYZER = "Plugalyzer";
-
 const db = new Database("plugins.db");
 
-// create tables if missing
 db.exec(`
 CREATE TABLE IF NOT EXISTS plugins (
   id INTEGER PRIMARY KEY,
@@ -26,6 +24,7 @@ CREATE TABLE IF NOT EXISTS parameters (
   name TEXT,
   "values" TEXT,
   default_value TEXT,
+  supports_text BOOLEAN DEFAULT 0,
   PRIMARY KEY(plugin_id, param_index),
   FOREIGN KEY(plugin_id) REFERENCES plugins(id)
 );
@@ -48,22 +47,29 @@ function findPlugins(dir) {
 
 async function listParameters(pluginPath) {
   try {
-    const { stdout } = await execa(PLUGALYZER, ["listParameters", `--plugin=${pluginPath}`]);
-    const params = [];
+    const { stdout } = await execa(
+      PLUGALYZER, 
+      ["listParameters", `--plugin=${pluginPath}`],
+      { timeout: 10000 } 
+    );
     const lines = stdout.split("\n").map(l => l.trim()).filter(Boolean);
-    let i = 0;
-    while (i < lines.length) {
-      if (/^\d+:/.test(lines[i])) {
-        const paramIndex = parseInt(lines[i].split(":")[0], 10);
-        const name = lines[i].split(":")[1].trim();
-        const values = lines[i + 1].replace("Values: ", "").trim();
-        const default_value = lines[i + 2].replace("Default: ", "").trim();
-        params.push({ param_index: paramIndex, name, values, default_value });
-        i += 3;
-      } else {
-        i++;
+    const params = [];
+
+    let current = null;
+    for (const line of lines) {
+      if (/^\d+:/.test(line)) {
+        if (current) params.push(current);
+        const [index, ...rest] = line.split(":");
+        current = { param_index: parseInt(index, 10), name: rest.join(":").trim() };
+      } else if (line.startsWith("Values:")) {
+        current.values = line.replace("Values:", "").trim();
+      } else if (line.startsWith("Default:")) {
+        current.default_value = line.replace("Default:", "").trim();
+      } else if (line.startsWith("Supports text values:")) {
+        current.supports_text = /true/i.test(line);
       }
     }
+    if (current) params.push(current);
     return params;
   } catch (err) {
     console.error(`❌ Failed to list parameters for ${pluginPath}:`, err.shortMessage || err.message);
@@ -75,32 +81,41 @@ function savePlugin(pluginPath, pluginName, parameters) {
   const stats = fs.statSync(pluginPath);
   const modifiedTime = Math.floor(stats.mtimeMs / 1000);
 
-  // Ensure plugin exists, get id
+  // insert with last_scanned = 0 so it's always treated as new initially
   const pluginRow = db.prepare(`
     INSERT INTO plugins (path, name, last_scanned)
-    VALUES (?, ?, ?)
+    VALUES (?, ?, 0)
     ON CONFLICT(path) DO UPDATE SET name=excluded.name
     RETURNING id, last_scanned
-  `).get(pluginPath, pluginName, modifiedTime);
+  `).get(pluginPath, pluginName);
 
   const plugin_id = pluginRow.id;
 
-  // Skip if plugin was already scanned and unchanged
+  // skip if already scanned and file hasn't changed
   if (pluginRow.last_scanned && pluginRow.last_scanned >= modifiedTime) {
     return false;
   }
 
   const insertParam = db.prepare(`
-    INSERT OR REPLACE INTO parameters (plugin_id, param_index, name, "values", default_value)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT OR REPLACE INTO parameters (
+      plugin_id, param_index, name, "values", default_value, supports_text
+    ) VALUES (?, ?, ?, ?, ?, ?)
   `);
 
   for (const p of parameters) {
-    insertParam.run(plugin_id, p.param_index, p.name, p.values, p.default_value);
+    insertParam.run(
+      plugin_id,
+      p.param_index,
+      p.name,
+      p.values || "",
+      p.default_value || "",
+      p.supports_text ? 1 : 0
+    );
   }
 
-  // update last_scanned
-  db.prepare(`UPDATE plugins SET last_scanned=? WHERE id=?`).run(Math.floor(Date.now() / 1000), plugin_id);
+  // now update last_scanned after successful parameter save
+  db.prepare(`UPDATE plugins SET last_scanned=? WHERE id=?`)
+    .run(Math.floor(Date.now() / 1000), plugin_id);
 
   return true;
 }
